@@ -1,0 +1,35 @@
+# Terraform
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.backup
+terraform/*.tfvars
+terraform/.terraform.lock.hcl
+terraform/crash.log
+# SSH keys
+*.pem
+*.key
+!example.pem
+
+# kubeconfig
+*.conf
+admin.conf
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# Local testing
+local/
+temp/
+*.tmp
+
+# Logs
+*.log
