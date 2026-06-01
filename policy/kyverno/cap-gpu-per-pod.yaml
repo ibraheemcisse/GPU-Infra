@@ -1,0 +1,23 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: cap-gpu-per-pod
+spec:
+  validationFailureAction: Enforce
+  rules:
+  - name: max-one-gpu-per-pod
+    match:
+      any:
+      - resources:
+          kinds:
+          - Pod
+    validate:
+      message: "A single pod cannot request more than 1 GPU."
+      foreach:
+      - list: "request.object.spec.containers"
+        deny:
+          conditions:
+            any:
+            - key: "{{ element.resources.limits.\"nvidia.com/gpu\" || '0' }}"
+              operator: GreaterThan
+              value: "1"

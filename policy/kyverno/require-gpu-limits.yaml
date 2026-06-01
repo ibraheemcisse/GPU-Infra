@@ -1,0 +1,26 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-gpu-limits
+spec:
+  validationFailureAction: Enforce
+  rules:
+  - name: require-gpu-resource-limits
+    match:
+      any:
+      - resources:
+          kinds:
+          - Pod
+    validate:
+      message: "Pods requesting nvidia.com/gpu must set explicit resource limits."
+      foreach:
+      - list: "request.object.spec.containers"
+        deny:
+          conditions:
+            all:
+            - key: "{{ element.resources.requests.\"nvidia.com/gpu\" || '0' }}"
+              operator: GreaterThan
+              value: "0"
+            - key: "{{ element.resources.limits.\"nvidia.com/gpu\" || '0' }}"
+              operator: Equals
+              value: "0"
