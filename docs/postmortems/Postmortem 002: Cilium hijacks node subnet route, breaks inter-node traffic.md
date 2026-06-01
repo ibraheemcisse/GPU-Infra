@@ -29,11 +29,10 @@ After a worker node successfully joined a two-node kubeadm cluster, all traffic 
 - tcpdump on worker: ICMP echo requests visible leaving `ens5`.
 - tcpdump on control plane: zero ICMP packets arriving. Only ARP.
 - Instances terminated and redeployed twice. Problem persists on fresh instances.
-- Session ends. Root cause misidentified as AWS hypervisor issue.
 
 **Day 2**
 
-- New chat session. Fresh analysis from routing layer.
+- Fresh analysis from routing layer.
 - `ip route show` on worker reveals:
   `10.0.1.0/24 via 10.0.1.60 dev cilium_host proto kernel src 10.0.1.60`
 - Same route present on control plane:
