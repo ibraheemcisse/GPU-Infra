@@ -1,0 +1,7 @@
+PyTorch version: 2.1.0
+CUDA available: True
+Device name: NVIDIA A10G
+VRAM total: 22.1 GB
+Matrix multiply result shape: torch.Size([5000, 5000])
+VRAM used after compute: 0.29 GB
+PyTorch GPU test PASSED
