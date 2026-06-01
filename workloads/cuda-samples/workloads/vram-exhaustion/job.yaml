@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vram-exhaust
+spec:
+  restartPolicy: Never
+  containers:
+  - name: vram-exhaust
+    image: pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+    command:
+    - python3
+    - -c
+    - |
+      import torch
+      print("Starting VRAM exhaustion test")
+      tensors = []
+      i = 0
+      while True:
+          t = torch.randn(1024, 1024, 256, device='cuda')
+          tensors.append(t)
+          used = torch.cuda.memory_allocated(0) / 1024**3
+          i += 1
+          print(f"Iteration {i}: VRAM used {used:.2f} GB")
+    resources:
+      limits:
+        nvidia.com/gpu: 1

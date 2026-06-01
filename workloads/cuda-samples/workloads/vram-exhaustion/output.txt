@@ -1,0 +1,23 @@
+Starting VRAM exhaustion test
+Iteration 1: VRAM used 1.00 GB
+Iteration 2: VRAM used 2.00 GB
+Iteration 3: VRAM used 3.00 GB
+Iteration 4: VRAM used 4.00 GB
+Iteration 5: VRAM used 5.00 GB
+Iteration 6: VRAM used 6.00 GB
+Iteration 7: VRAM used 7.00 GB
+Iteration 8: VRAM used 8.00 GB
+Iteration 9: VRAM used 9.00 GB
+Iteration 10: VRAM used 10.00 GB
+Iteration 11: VRAM used 11.00 GB
+Iteration 12: VRAM used 12.00 GB
+Iteration 13: VRAM used 13.00 GB
+Iteration 14: VRAM used 14.00 GB
+Iteration 15: VRAM used 15.00 GB
+Iteration 16: VRAM used 16.00 GB
+Iteration 17: VRAM used 17.00 GB
+Iteration 18: VRAM used 18.00 GB
+Iteration 19: VRAM used 19.00 GB
+Iteration 20: VRAM used 20.00 GB
+Iteration 21: VRAM used 21.00 GB
+torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate 1024.00 MiB. GPU 0 has a total capacty of 22.06 GiB of which 823.44 MiB is free. Including non-PyTorch memory, this process has 21.25 GiB memory in use. Of the allocated memory 21.00 GiB is allocated by PyTorch, and 0 bytes is reserved by PyTorch but unallocated.
