@@ -48,10 +48,13 @@ resource "aws_route_table_association" "lab" {
   route_table_id = aws_route_table.lab.id
 }
 
-# ── Security Groups ───────────────────────────────────────────────────────────
+# ── Security Group ────────────────────────────────────────────────────────────
+# Single node: control plane + worker on one instance
+# Calico CNI (no IPIP protocol 4 needed)
+# EC2 Instance Connect range included for browser-based SSH
 
-resource "aws_security_group" "control_plane" {
-  name   = "gpu-infra-cp-sg"
+resource "aws_security_group" "gpu_node" {
+  name   = "gpu-infra-node-sg"
   vpc_id = aws_vpc.lab.id
 
   ingress {
@@ -59,7 +62,15 @@ resource "aws_security_group" "control_plane" {
     to_port     = 22
     protocol    = "tcp"
     cidr_blocks = [var.allowed_ssh_cidr]
-    description = "SSH from your IP"
+    description = "SSH from operator IP"
+  }
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["18.206.107.24/29"]
+    description = "EC2 Instance Connect us-east-1"
   }
 
   ingress {
@@ -87,57 +98,35 @@ resource "aws_security_group" "control_plane" {
   }
 
   ingress {
-    from_port   = -1
-    to_port     = -1
-    protocol    = "4"
-    cidr_blocks = ["10.0.0.0/16"]
-    description = "Cilium/IPIP"
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = { Name = "gpu-infra-cp-sg" }
-}
-
-resource "aws_security_group" "gpu_worker" {
-  name   = "gpu-infra-worker-sg"
-  vpc_id = aws_vpc.lab.id
-
-  ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = [var.allowed_ssh_cidr]
-    description = "SSH"
-  }
-
-  ingress {
-    from_port   = 10250
-    to_port     = 10250
-    protocol    = "tcp"
-    cidr_blocks = ["10.0.0.0/16"]
-    description = "kubelet"
-  }
-
-  ingress {
     from_port   = 30000
     to_port     = 32767
     protocol    = "tcp"
     cidr_blocks = [var.allowed_ssh_cidr]
-    description = "NodePort"
+    description = "NodePort services"
   }
 
   ingress {
-    from_port   = -1
-    to_port     = -1
-    protocol    = "4"
+    from_port   = 179
+    to_port     = 179
+    protocol    = "tcp"
     cidr_blocks = ["10.0.0.0/16"]
-    description = "Cilium/IPIP"
+    description = "Calico BGP"
+  }
+
+  ingress {
+    from_port   = 9090
+    to_port     = 9090
+    protocol    = "tcp"
+    cidr_blocks = ["10.0.0.0/16"]
+    description = "Prometheus"
+  }
+
+  ingress {
+    from_port   = 9400
+    to_port     = 9400
+    protocol    = "tcp"
+    cidr_blocks = ["10.0.0.0/16"]
+    description = "DCGM exporter"
   }
 
   egress {
@@ -147,42 +136,20 @@ resource "aws_security_group" "gpu_worker" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = { Name = "gpu-infra-worker-sg" }
+  tags = { Name = "gpu-infra-node-sg" }
 }
 
-# ── EC2 Instances ─────────────────────────────────────────────────────────────
+# ── EC2 Instance ──────────────────────────────────────────────────────────────
+# Single node: g5.xlarge runs both control plane and workloads
+# containerd pinned to 1.7.29 (2.x breaks CRI with Kubernetes 1.31)
 
-resource "aws_instance" "control_plane" {
-  ami                    = var.ubuntu_ami
-  instance_type          = "t3.medium"
-  key_name               = var.key_name
-  subnet_id              = aws_subnet.lab.id
-  vpc_security_group_ids = [aws_security_group.control_plane.id]
-
-  metadata_options {
-    http_tokens                 = "required"
-    http_endpoint               = "enabled"
-    http_put_response_hop_limit = 1
-  }
-
-  root_block_device {
-    volume_type           = "gp3"
-    volume_size           = 30
-    encrypted             = true
-    delete_on_termination = true
-  }
-
-  user_data = base64encode(file("${path.module}/bootstrap-control-plane.sh"))
-
-  tags = { Name = "gpu-infra-control-plane" }
-}
-
-resource "aws_instance" "gpu_worker" {
+resource "aws_instance" "gpu_node" {
   ami                    = var.ubuntu_ami
   instance_type          = "g5.xlarge"
   key_name               = var.key_name
   subnet_id              = aws_subnet.lab.id
-  vpc_security_group_ids = [aws_security_group.gpu_worker.id]
+  vpc_security_group_ids = [aws_security_group.gpu_node.id]
+  source_dest_check      = false
 
   metadata_options {
     http_tokens                 = "required"
@@ -197,26 +164,24 @@ resource "aws_instance" "gpu_worker" {
     delete_on_termination = true
   }
 
-  user_data = base64encode(file("${path.module}/bootstrap-gpu-worker.sh"))
+  user_data = base64encode(file("${path.module}/bootstrap-gpu-node.sh"))
 
-  tags = { Name = "gpu-infra-gpu-worker" }
+  tags = {
+    Name = "gpu-infra-gpu-node"
+    Role = "control-plane-worker"
+  }
 }
 
-# ── EIPs ──────────────────────────────────────────────────────────────────────
+# ── EIP ───────────────────────────────────────────────────────────────────────
 
-resource "aws_eip" "control_plane" {
-  instance = aws_instance.control_plane.id
+resource "aws_eip" "gpu_node" {
+  instance = aws_instance.gpu_node.id
   domain   = "vpc"
-  tags     = { Name = "gpu-infra-cp-eip" }
-}
-
-resource "aws_eip" "gpu_worker" {
-  instance = aws_instance.gpu_worker.id
-  domain   = "vpc"
-  tags     = { Name = "gpu-infra-worker-eip" }
+  tags     = { Name = "gpu-infra-node-eip" }
 }
 
 # ── Auto-stop Scheduler ───────────────────────────────────────────────────────
+# g5.xlarge: ~$1.006/hr running, ~$0.005/hr stopped (EIP only)
 
 resource "aws_iam_role" "scheduler" {
   name = "gpu-infra-scheduler-role"
@@ -237,29 +202,33 @@ resource "aws_iam_role_policy" "scheduler" {
     Statement = [{
       Effect   = "Allow"
       Action   = ["ec2:StopInstances", "ec2:StartInstances"]
-      Resource = aws_instance.gpu_worker.arn
+      Resource = aws_instance.gpu_node.arn
     }]
   })
 }
 
 resource "aws_scheduler_schedule" "gpu_stop" {
-  name                = "gpu-infra-stop"
-  schedule_expression = var.gpu_worker_stop_schedule
+  name                         = "gpu-infra-stop"
+  schedule_expression          = var.gpu_node_stop_schedule
+  schedule_expression_timezone = "UTC"
   flexible_time_window { mode = "OFF" }
+  state = "ENABLED"
   target {
     arn      = "arn:aws:scheduler:::aws-sdk:ec2:stopInstances"
     role_arn = aws_iam_role.scheduler.arn
-    input    = jsonencode({ InstanceIds = [aws_instance.gpu_worker.id] })
+    input    = jsonencode({ InstanceIds = [aws_instance.gpu_node.id] })
   }
 }
 
 resource "aws_scheduler_schedule" "gpu_start" {
-  name                = "gpu-infra-start"
-  schedule_expression = var.gpu_worker_start_schedule
+  name                         = "gpu-infra-start"
+  schedule_expression          = var.gpu_node_start_schedule
+  schedule_expression_timezone = "UTC"
   flexible_time_window { mode = "OFF" }
+  state = "ENABLED"
   target {
     arn      = "arn:aws:scheduler:::aws-sdk:ec2:startInstances"
     role_arn = aws_iam_role.scheduler.arn
-    input    = jsonencode({ InstanceIds = [aws_instance.gpu_worker.id] })
+    input    = jsonencode({ InstanceIds = [aws_instance.gpu_node.id] })
   }
 }
