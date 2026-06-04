@@ -10,7 +10,7 @@ Single-node Kubernetes GPU infrastructure lab on AWS. Built from scratch using k
 
 ## What Was Built
 
-A production-style GPU infrastructure environment on a single AWS g5.xlarge (NVIDIA A10G, 24GB VRAM) running Kubernetes 1.31. The cluster runs GPU workloads, enforces multi-tenant isolation via policy and quota, and exposes GPU metrics through Prometheus and DCGM.
+GPU infrastructure environment on a single AWS g5.xlarge (NVIDIA A10G, 24GB VRAM) running Kubernetes 1.31. The cluster runs GPU workloads, enforces multi-tenant isolation via policy and quota, and exposes GPU metrics through Prometheus and DCGM.
 
 ---
 
