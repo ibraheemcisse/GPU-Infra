@@ -1,207 +1,275 @@
+![GPU Infrastructure Architecture](arc.png)
+
 # gpu-infra
 
-Kubernetes infrastructure lab on AWS with GPU support. Built from scratch using kubeadm, Terraform, and manual operations to understand the full stack.
+Single-node Kubernetes GPU infrastructure lab on AWS. Built from scratch using kubeadm and Terraform to understand the full stack — real bootstrapping, real failures, real postmortems.
 
-**Goal:** Operational depth on GPU infrastructure — not tutorials, not managed services, not abstractions. Real bootstrapping, real failures, real postmortems.
+**Not a tutorial follow-along. Every failure is documented.**
 
-## What's here
-terraform/              Complete infrastructure-as-code (VPC, security groups, EC2, scheduler)
-main.tf              12 AWS resources (VPC, subnets, instances, EIPs, auto-stop)
-variables.tf         Configuration (region, SSH CIDR, instance types, schedules)
-outputs.tf           Quick reference (IPs, SSH commands)
-bootstrap-*.sh       kubeadm bootstrap scripts for control plane + GPU worker
-docs/
-bootstrap.md         Full manual walkthrough (for learning)
-postmortems/         Incident analysis (populated when GPU workloads run)
-workloads/
-cuda-samples/        CUDA validation
-pytorch-test/        Framework integration test
-vram-exhaustion/     Deliberate OOM postmortem
-ollama/              Real inference workload
+---
+
+## What Was Built
+
+A production-style GPU infrastructure environment on a single AWS g5.xlarge (NVIDIA A10G, 24GB VRAM) running Kubernetes 1.31. The cluster runs GPU workloads, enforces multi-tenant isolation via policy and quota, and exposes GPU metrics through Prometheus and DCGM.
+
+---
+
+## Repository Structure
+
+```
+GPU-Infra/
+├── terraform/
+│   ├── main.tf                        Single-node infrastructure (VPC, SG, EC2, EIP, scheduler)
+│   ├── variables.tf                   Configuration (region, SSH CIDR, schedules)
+│   ├── outputs.tf                     IPs and SSH commands
+│   └── bootstrap-gpu-node.sh          Node bootstrap (containerd pinned to 1.7.29)
+├── docs/
+│   └── postmortems/
+│       ├── 001-containerd-incompatibility.md
+│       ├── 002-cilium-route-hijack.md
+│       ├── 003-single-node-pivot.md
+│       ├── 004-cni-migration-networking-collapse.md
+│       └── 005-vram-exhaustion.md
+├── policy/
+│   ├── kyverno/
+│   │   ├── require-gpu-limits.yaml    Reject pods without GPU resource limits
+│   │   └── cap-gpu-per-pod.yaml       Cap GPU requests at 1 per pod
+│   └── namespaces/
+│       └── teams.yaml                 Multi-tenant namespaces with ResourceQuota
+└── workloads/
+    ├── cuda-samples/                  CUDA validation (nvidia-smi in pod)
+    ├── pytorch-test/                  PyTorch matmul on A10G
+    ├── vram-exhaustion/               Deliberate OOM postmortem
+    └── ollama/                        TinyLlama inference workload
+```
+
+---
 
 ## Stack
 
 | Component | Details |
 |-----------|---------|
-| **Control plane** | t3.medium (4 vCPU, 4GB RAM, 30GB disk) |
-| **GPU worker** | g5.xlarge (4 vCPU, 16GB RAM, 50GB disk, NVIDIA A10G 24GB VRAM) |
-| **Runtime** | containerd 2.x |
-| **Orchestrator** | kubeadm 1.31 |
-| **CNI** | Cilium (eBPF-ready) |
-| **Networking** | Private VPC (10.0.0.0/16), EIPs for stable SSH |
-| **Auto-stop** | EventBridge Scheduler (GPU worker stops after hours) |
+| Node | g5.xlarge — 4 vCPU, 16GB RAM, 50GB disk |
+| GPU | NVIDIA A10G, 24GB VRAM (usable ceiling ~21GB) |
+| OS | Ubuntu 22.04 LTS |
+| Runtime | containerd 1.7.29 (pinned — 2.x breaks CRI with k8s 1.31) |
+| Orchestrator | kubeadm 1.31.14 |
+| CNI | Calico v3.27 |
+| GPU stack | NVIDIA GPU Operator (driver 580.126.20, CUDA 13.0) |
+| Policy | Kyverno (admission control, GPU limits enforcement) |
+| Monitoring | Prometheus + Grafana + DCGM Exporter |
+| IaC | Terraform >= 1.5 |
+| Scheduler | EventBridge (auto-stop 18:00 UTC, auto-start 09:00 UTC) |
 
-## Quick start
+---
+
+## Workload Results
+
+| Workload | Result | VRAM |
+|----------|--------|------|
+| CUDA validation | nvidia-smi in pod, A10G confirmed | 0MiB |
+| PyTorch matmul 5000x5000 | PASSED | 0.29GB |
+| VRAM exhaustion | OOM at iteration 21 (21GB) | 22.06GB at crash |
+| Ollama + TinyLlama | Inference working | 1019MiB at load |
+
+---
+
+## Policy Enforcement
+
+Two Kyverno ClusterPolicies in Enforce mode:
+
+**require-gpu-limits** — any pod requesting `nvidia.com/gpu` must set explicit resource limits. Rejected at admission:
+
+```
+admission webhook denied: Pods requesting nvidia.com/gpu must set explicit resource limits.
+```
+
+**cap-gpu-per-pod** — no pod can request more than 1 GPU slice.
+
+---
+
+## Multi-Tenant GPU Simulation
+
+GPU time-slicing configured via NVIDIA GPU Operator:
+
+```
+1 physical A10G → nvidia.com/gpu: 4
+```
+
+Three team namespaces with ResourceQuota:
+
+```
+team-alpha: 2 GPU
+team-beta:  1 GPU
+team-gamma: 1 GPU
+```
+
+Quota enforcement test:
+
+```
+pods "beta-overflow" is forbidden: exceeded quota: gpu-quota,
+requested: requests.nvidia.com/gpu=1,
+used: requests.nvidia.com/gpu=1,
+limited: requests.nvidia.com/gpu=1
+```
+
+---
+
+## Quick Start
 
 ### Prerequisites
 
 ```bash
-# AWS credentials configured
 aws sts get-caller-identity
-
-# Terraform >= 1.5
 terraform version
-
-# SSH key pair created in AWS
-aws ec2 describe-key-pairs --key-names your-key-name
+aws ec2 describe-key-pairs --key-names gpu-infra
 ```
 
 ### Provision infrastructure
 
 ```bash
 cd terraform
-
-# Get your public IP
-YOUR_IP=$(curl -s ifconfig.me)
-
-# Initialize and plan
 terraform init
 terraform plan \
-  -var="allowed_ssh_cidr=${YOUR_IP}/32" \
-  -var="key_name=your-key-name"
-
-# Apply
+  -var="allowed_ssh_cidr=$(curl -s ifconfig.me)/32" \
+  -var="key_name=gpu-infra"
 terraform apply \
-  -var="allowed_ssh_cidr=${YOUR_IP}/32" \
-  -var="key_name=your-key-name"
-
-# Wait 2 minutes for instances to boot, then:
-terraform output
+  -var="allowed_ssh_cidr=$(curl -s ifconfig.me)/32" \
+  -var="key_name=gpu-infra"
 ```
 
 ### Bootstrap cluster
 
 ```bash
-# SSH to control plane
-ssh -i ~/.ssh/your-key-name.pem ubuntu@<control-plane-public-ip>
+# Fix containerd config
+sudo mkdir -p /etc/containerd
+containerd config default | sudo tee /etc/containerd/config.toml
+sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+sudo systemctl restart containerd
 
-# kubeadm init (already run by user_data, verify it worked)
-kubectl get nodes
+# Initialize cluster
+sudo kubeadm init \
+  --pod-network-cidr=192.168.0.0/16 \
+  --apiserver-advertise-address=<private-ip> \
+  --control-plane-endpoint=<private-ip> \
+  --skip-phases=addon/kube-proxy
 
-# Install Cilium CNI
-kubectl apply -f https://github.com/cilium/cilium-cli/releases/latest/download/cilium-linux-amd64.tar.gz
-cilium install --version 1.15.0
+# Set up kubeconfig
+mkdir -p $HOME/.kube
+sudo cp /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
 
-# Verify cluster is Ready
+# Remove control-plane taint (single node)
+kubectl taint nodes --all node-role.kubernetes.io/control-plane-
+
+# Install Calico CNI
+kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.27.0/manifests/calico.yaml
+
+# Verify
 kubectl get nodes
 ```
 
-### Join GPU worker
-
-Once the control plane is ready:
+### Install GPU Operator
 
 ```bash
-# On control plane, get the join command
-kubeadm token create --print-join-command
+helm repo add nvidia https://helm.ngc.nvidia.com/nvidia
+helm repo update
+helm install gpu-operator nvidia/gpu-operator \
+  --namespace gpu-operator \
+  --create-namespace \
+  --wait \
+  --timeout 15m
 
-# SSH to GPU worker
-ssh -i ~/.ssh/your-key-name.pem ubuntu@<gpu-worker-public-ip>
-
-# Run the join command
-sudo kubeadm join <control-plane-ip>:6443 --token ... --discovery-token-ca-cert-hash ...
-
-# Back on control plane, verify
-kubectl get nodes
-# Both nodes should show Ready
+# Gate check
+kubectl describe node | grep -A10 "Capacity:"
+# Must show: nvidia.com/gpu: 1
 ```
 
-### Run GPU workloads
-
-Once GPU worker is Ready:
+### Run workloads
 
 ```bash
-# 1. Validate GPU access
+# 1. CUDA validation
 kubectl apply -f workloads/cuda-samples/validate.yaml
-kubectl logs -f -l job-name=cuda-validate
+kubectl logs cuda-validate
 
-# 2. Run PyTorch test
+# 2. PyTorch test
 kubectl apply -f workloads/pytorch-test/job.yaml
-kubectl logs -f -l job-name=pytorch-test
+kubectl logs pytorch-test
 
-# 3. VRAM exhaustion (deliberate OOM)
+# 3. VRAM exhaustion
 kubectl apply -f workloads/vram-exhaustion/job.yaml
-# Watch it fail, document the postmortem
+kubectl logs vram-exhaust
 
 # 4. Ollama inference
 kubectl apply -f workloads/ollama/deployment.yaml
-kubectl port-forward svc/ollama 11434:11434
-curl -X POST http://localhost:11434/api/generate -d '{"model":"llama2","prompt":"hello"}'
+kubectl exec -it ollama -- ollama pull tinyllama
+kubectl exec -it ollama -- ollama run tinyllama "What is a GPU?"
 ```
 
-## Key decisions
+### Apply policies
 
-**Why kubeadm, not managed (EKS)?**
-- Operational depth: understand every component initialization
-- Bootstrap from first principles
-- See the full failure surface
-
-**Why Terraform, not Console?**
-- Infrastructure as code (repeatable, reviewable)
-- Documented decisions (VPC sizing, security group rules)
-- Fast teardown + replay
-
-**Why Cilium CNI?**
-- eBPF-ready for future observability labs
-- Stable in single-node scenarios (unlike Flannel)
-- Production patterns
-
-**Why private IP for --control-plane-endpoint?**
-- EIP works externally, breaks internal kubelet → API connectivity
-- Private IP is stable within VPC (EIP is for external SSH only)
-
-**Why GPU worker has 50GB root volume?**
-- NVIDIA drivers compile at GPU Operator install
-- CUDA runtime + kernels + model weights
-- 30GB is too tight
-
-## GPU quota constraint
-
-**Status:** AWS denied vCPU quota increase twice (on-demand + spot).
-
-This is a **real operational lesson**, not a failure:
-- AWS quota is a hard wall for new accounts
-- GPU quota approval takes days or requires detailed justification
-- Alternatives exist (RunPod, Lambda Labs, bare metal)
-
-**Workloads are staged and ready** — GPU access is the only blocker.
-
-When GPU is available:
-1. Uncomment `gpu_worker` instance in `main.tf`
-2. `terraform apply`
-3. Join it to cluster (kubeadm join)
-4. Install NVIDIA GPU Operator
-5. Run workload sequence
-
-## Cost
-
-| Resource | Cost/hr | Running | Stopped |
-|----------|---------|---------|---------|
-| Control plane (t3.medium) | $0.042 | $0.042 | $0 |
-| GPU worker (g5.xlarge) | $1.006 | $1.006 | $0 |
-| EIPs (2x) | $0.015 | $0.015 | $0.015 |
-| **Total** | | **~$1.06/hr** | **$0.015/hr** |
-
-GPU worker auto-stops after business hours (see `bootstrap-gpu-worker.sh`).
-
-## Next steps
-
-1. Provision infrastructure (`terraform apply`)
-2. Bootstrap control plane and GPU worker
-3. Run CUDA samples (validation)
-4. Run PyTorch test (framework integration)
-5. Run VRAM exhaustion (postmortem learning)
-6. Deploy Ollama (real operational load)
-7. Document failures and learnings
-
-## References
-
-- [kubeadm docs](https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/)
-- [Cilium CNI](https://docs.cilium.io/)
-- [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/)
-- [The GPU Challenge at Scale](https://www.ebook-collection.com/) (operational fundamentals)
+```bash
+kubectl create -f https://github.com/kyverno/kyverno/releases/latest/download/install.yaml
+kubectl apply -f policy/kyverno/
+kubectl apply -f policy/namespaces/
+```
 
 ---
 
-**Status:** See [STATUS.md](STATUS.md) for current lab state and blockers.
+## Key Decisions
 
-**Questions?** Open an issue or check [docs/bootstrap.md](docs/bootstrap.md) for manual walkthrough.
+**Why kubeadm, not EKS?**
+Operational depth. Understanding every component, seeing the full failure surface, debugging from first principles.
+
+**Why single node?**
+Two-node architecture hit a persistent inter-node networking failure caused by Cilium route injection. Architecture simplified to single node to unblock GPU workload execution. See postmortems 002 and 003.
+
+**Why Calico, not Cilium?**
+Cilium injects a host route that redirects the entire node subnet through `cilium_host`, breaking node-to-node traffic before Cilium can initialize. Calico does not exhibit this behavior. See postmortem 002.
+
+**Why containerd 1.7.29 pinned?**
+containerd 2.x introduced CRI changes incompatible with Kubernetes 1.31. See postmortem 001.
+
+**Why private IP for --control-plane-endpoint?**
+EIP is unreachable from inside the VPC. kubelet uses the internal network to reach the API server.
+
+---
+
+## Postmortems
+
+| # | Title | Root Cause |
+|---|-------|------------|
+| 001 | containerd 2.x CRI incompatibility | apt installed latest containerd, breaking kubeadm |
+| 002 | Cilium route hijack | Cilium injected subnet route through cilium_host |
+| 003 | Single-node pivot | Two-node inter-node networking unresolvable |
+| 004 | CNI migration collapse | Cilium + Calico residual state partitioned pod network |
+| 005 | VRAM exhaustion OOM | No GPU memory limit, driver overhead not accounted for |
+
+Full postmortems: [docs/postmortems/](docs/postmortems/)
+
+---
+
+## Key Numbers
+
+| Metric | Value |
+|--------|-------|
+| GPU | NVIDIA A10G |
+| Total VRAM | 23028MiB |
+| Usable VRAM ceiling | ~21GB |
+| Time-slicing replicas | 4 |
+| Postmortems | 5 |
+| Workloads completed | 4 |
+| Days to first working GPU pod | 3 |
+| AWS credits used | $9.32 of $500 |
+
+---
+
+## Cost
+
+| Resource | Running | Stopped |
+|----------|---------|---------|
+| g5.xlarge | $1.006/hr | $0 |
+| EIP | $0.005/hr | $0.005/hr |
+| **Total** | **~$1.01/hr** | **~$0.005/hr** |
+
+EventBridge auto-stops the instance at 18:00 UTC and restarts at 09:00 UTC Mon-Fri.
