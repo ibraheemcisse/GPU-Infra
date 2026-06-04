@@ -2,7 +2,7 @@
 
 # gpu-infra
 
-Single-node Kubernetes GPU infrastructure lab on AWS. Built from scratch using kubeadm and Terraform to understand the full stack — real bootstrapping, real failures, real postmortems.
+Single-node Kubernetes GPU infrastructure lab on AWS. Built from scratch using kubeadm and Terraform to understand the full stack real bootstrapping, real failures, real postmortems.
 
 **Not a tutorial follow-along. Every failure is documented.**
 
